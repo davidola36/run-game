@@ -128,6 +128,20 @@ export class Environment {
         }
     }
 
+    createLaneLine() {
+        const lineGeometry = new THREE.PlaneGeometry(0.2, this.segmentLength);
+        const lineMaterial = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            emissive: 0xffffff,
+            emissiveIntensity: 0.5,
+            metalness: 0.5,
+            roughness: 0.3
+        });
+        const line = new THREE.Mesh(lineGeometry, lineMaterial);
+        line.rotation.x = -Math.PI / 2;
+        return line;
+    }
+
     createRoadSegment() {
         // Create road base (darker, slightly lower than the road surface)
         const baseGeometry = new THREE.PlaneGeometry(this.roadWidth + 2, this.segmentLength);
@@ -178,14 +192,17 @@ export class Environment {
         centerLine.position.y = 1.01; // Slightly above road
         roadGroup.add(centerLine);
 
-        // Side lines
-        const leftLine = centerLine.clone();
-        leftLine.position.x = -this.roadWidth/4;
-        roadGroup.add(leftLine);
-
-        const rightLine = centerLine.clone();
-        rightLine.position.x = this.roadWidth/4;
-        roadGroup.add(rightLine);
+        // Update lane line positions for two lanes
+        const leftLine = this.createLaneLine();
+        const rightLine = this.createLaneLine();
+        
+        // Position lines to create two lanes instead of four
+        // No need for middle lines anymore as we only have one line in the center
+        leftLine.position.x = 0;  // Center line
+        leftLine.position.y = 1.02;
+        leftLine.position.z = 0;
+        
+        rightLine.visible = false;  // Hide the second line since we only need one center line
 
         // Add shoulders (sides of the road)
         const shoulderGeometry = new THREE.BoxGeometry(1, 0.1, this.segmentLength);

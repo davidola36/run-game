@@ -1,5 +1,5 @@
 import * as poseDetection from '@tensorflow-models/pose-detection';
-import '@tensorflow/tfjs';
+import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgl';
 
 export class PoseController {
@@ -30,7 +30,7 @@ export class PoseController {
             lateral_threshold: 0.1,    // Threshold for left/right movement
             jump_threshold: 0.15,      // Threshold for jump detection
             duck_threshold: 0.2,       // Threshold for duck detection
-            walk_threshold: 0.01        // Threshold for walk detection
+            walk_threshold: 0.05        // Threshold for walk detection
         };
 
         this.setupControls();
@@ -38,6 +38,14 @@ export class PoseController {
 
     async initialize() {
         try {
+            // Initialize TensorFlow.js backend
+            await tf.setBackend('webgl');
+            console.log('Using backend:', tf.getBackend());
+            
+            // Wait for TensorFlow.js to be ready
+            await tf.ready();
+            console.log('TensorFlow.js is ready');
+
             // Create container for video and canvas
             this.videoContainer = document.createElement('div');
             this.videoContainer.style.cssText = `
@@ -51,7 +59,7 @@ export class PoseController {
                 background-color: rgba(0, 0, 0, 0.5);
                 z-index: 1000;
                 overflow: hidden;
-                display: none; // Start hidden by default
+                display: none;
             `;
             document.body.appendChild(this.videoContainer);
 
@@ -102,11 +110,11 @@ export class PoseController {
                 text-align: center;
                 border-radius: 0 0 8px 8px;
                 z-index: 1000;
-                display: none; // Start hidden by default
+                display: none;
             `;
             document.body.appendChild(this.movementLabel);
 
-            // Initialize MoveNet
+            // Initialize MoveNet with explicit model loading
             this.detector = await poseDetection.createDetector(
                 poseDetection.SupportedModels.MoveNet,
                 {
@@ -116,7 +124,9 @@ export class PoseController {
                 }
             );
 
-            // this.setupControls();
+            if (!this.detector) {
+                throw new Error('Failed to create pose detector');
+            }
 
             console.log('PoseController initialized successfully');
             return true;
@@ -500,10 +510,11 @@ export class PoseController {
                 this.movementLabel.style.display = 'block';
             }
 
+            // Request camera access with specific constraints
             const stream = await navigator.mediaDevices.getUserMedia({ 
                 video: {
-                    width: { ideal: 320, min: 320 },
-                    height: { ideal: 240, min: 240 },
+                    width: { ideal: 320 },
+                    height: { ideal: 240 },
                     facingMode: 'user',
                     frameRate: { ideal: 30 }
                 }
@@ -511,76 +522,26 @@ export class PoseController {
             
             this.videoElement.srcObject = stream;
             
-            // Wait for video to be fully loaded before proceeding
-            await new Promise((resolve, reject) => {
-                let timeoutId;
-                
-                const checkDimensions = () => {
-                    if (this.videoElement.videoWidth > 0 && this.videoElement.videoHeight > 0) {
-                        clearTimeout(timeoutId);
-                        console.log('Video dimensions ready:', {
-                            width: this.videoElement.videoWidth,
-                            height: this.videoElement.videoHeight
-                        });
-                        resolve();
-                    }
-                };
-
+            // Wait for video to be ready
+            await new Promise((resolve) => {
                 this.videoElement.onloadedmetadata = () => {
-                    this.videoElement.onloadeddata = async () => {
-                        try {
-                            await this.videoElement.play();
-                            // Check dimensions immediately after play
-                            checkDimensions();
-                            
-                            // Also set up an interval to check dimensions
-                            const dimensionCheckInterval = setInterval(() => {
-                                if (this.videoElement.videoWidth > 0 && this.videoElement.videoHeight > 0) {
-                                    clearInterval(dimensionCheckInterval);
-                                    console.log('Video dimensions confirmed:', JSON.stringify({
-                                        width: this.videoElement.videoWidth,
-                                        height: this.videoElement.videoHeight,
-                                        readyState: this.videoElement.readyState
-                                    }));
-                                    resolve();
-                                }
-                            }, 100);
-
-                            // Set a timeout to abort if dimensions never become available
-                            timeoutId = setTimeout(() => {
-                                clearInterval(dimensionCheckInterval);
-                                reject(new Error('Timeout waiting for video dimensions'));
-                            }, 10000);
-                        } catch (error) {
-                            reject(error);
-                        }
-                    };
+                    this.videoElement.play();
+                    resolve();
                 };
-                
-                this.videoElement.onerror = (error) => reject(new Error(`Video error: ${error}`));
             });
 
-            // Once video is ready, start detection
+            // Update canvas dimensions to match video
+            this.canvas.width = this.videoElement.videoWidth;
+            this.canvas.height = this.videoElement.videoHeight;
+            
             this.isActive = true;
-            this.videoElement.style.display = 'block';
-            this.canvas.style.display = 'block';
+            this.startDetectionLoop();
             
-            // Attempt initial calibration
-            console.log('Attempting initial calibration...');
-            const calibrated = await this.calibrate();
-            if (calibrated) {
-                console.log('Initial calibration successful');
-                this.startDetectionLoop();
-            } else {
-                console.warn('Initial calibration failed, will try again in detection loop');
-                this.startDetectionLoop();
-            }
-            
-            console.log('Pose detection started successfully');
+            console.log('Pose detection started');
         } catch (error) {
             console.error('Error starting pose detection:', error);
             this.isActive = false;
-            throw error; // Propagate error up
+            throw error;
         }
     }
 
@@ -624,8 +585,8 @@ export class PoseController {
                 this.movementLabel.textContent = activeMovements.length > 0 
                     ? activeMovements.join(', ')
                     : 'Standing still';
-                
                 if (this.onControlsUpdate) {
+
                     this.onControlsUpdate(movements);
                 }
             }

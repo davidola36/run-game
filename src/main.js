@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader';
+import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader';
 import { Character } from './character.js';
 import { Environment } from './environment.js';
 import { Obstacle } from './obstacle.js';
@@ -30,32 +32,6 @@ class Game {
         // Store GUI instance
         this.gui = null;
 
-        // Game properties - Initialize these first
-        this.obstacles = [];
-        this.score = 0;
-        this.speed = this.settings.game.obstacleSpeed;
-        this.lastTime = 0;
-        this.isMovingLeft = false;
-        this.isMovingRight = false;
-        this.isMovingForward = false;
-        this.lateralSpeed = 0.3;
-        this.laneWidth = 4.5;
-        this.maxLateralPosition = 8;
-        this.roadOffset = 1;
-
-        // Game states
-        this.gameStates = {
-            MENU: 'menu',
-            PLAYING: 'playing',
-            PAUSED: 'paused',
-            GAME_OVER: 'gameOver'
-        };
-        this.currentState = this.gameStates.MENU;
-
-        // DOM elements
-        this.container = document.getElementById('game-container');
-        this.scoreElement = document.getElementById('score');
-        
         // Scene setup with skybox
         this.scene = new THREE.Scene();
         this.setupSkybox();
@@ -66,25 +42,98 @@ class Game {
         // Renderer setup with better exposure
         this.renderer = new THREE.WebGLRenderer({ 
             antialias: true,
-            powerPreference: "high-performance"
+            powerPreference: "high-performance",
+            stencil: false,
+            depth: true
         });
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer.setPixelRatio(window.devicePixelRatio);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit pixel ratio
         this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 2.0; // Increased exposure
+        this.renderer.toneMappingExposure = 2.0;
+        
+        // Add texture loading optimization
+        THREE.TextureLoader.prototype.crossOrigin = 'anonymous';
+        THREE.TextureLoader.prototype.load = function(url, onLoad, onProgress, onError) {
+            const texture = new THREE.Texture();
+            const image = new Image();
+            image.crossOrigin = 'anonymous';
+            
+            image.onload = function() {
+                texture.image = image;
+                texture.needsUpdate = true;
+                if (onLoad) onLoad(texture);
+            };
+            
+            image.onerror = function() {
+                if (onError) onError(new Error('Failed to load texture: ' + url));
+            };
+            
+            if (onProgress) {
+                image.onprogress = function(e) {
+                    if (e.lengthComputable) {
+                        onProgress({ loaded: e.loaded, total: e.total });
+                    }
+                };
+            }
+            
+            image.src = url;
+            return texture;
+        };
+        
+        // DOM elements
+        this.container = document.getElementById('game-container');
         this.container.appendChild(this.renderer.domElement);
-
-        // Camera settings
-        this.cameraOffset = new THREE.Vector3(0, 8, 20); // Moved camera further back and higher
-        this.cameraTarget = new THREE.Vector3(0, 2, -15); // Adjusted target to look further ahead
-        this.camera.position.copy(this.cameraOffset);
-        this.camera.lookAt(this.cameraTarget);
+        this.scoreElement = document.getElementById('score');
 
         // Setup lighting first
         this.setupLighting();
+
+        // Initialize environment
+        this.environment = new Environment(this.scene);
+
+        // Game properties - Initialize these after environment
+        this.obstacles = [];
+        this.score = 0;
+        this.speed = this.settings.game.obstacleSpeed;
+        this.lastTime = 0;
+        this.isMovingLeft = false;
+        this.isMovingRight = false;
+        this.isMovingForward = false;
+        this.lateralSpeed = 0.3;
+        this.laneWidth = this.environment.roadWidth / 2; // Now environment exists
+        this.maxLateralPosition = 8;
+        this.roadOffset = 1; // Increased from 1 to 100 to spawn obstacles much further away
+        this.currentLane = 0; // 0 = left lane, 1 = right lane
+        this.isJumping = false;
+        this.isDucking = false;
+        this.jumpHeight = 5;
+        this.jumpSpeed = 0.2;
+        this.gravity = 0.4;
+        this.verticalSpeed = 0;
+        this.horizontalSpeed = 0;
+        this.maxHorizontalSpeed = this.laneWidth / 10;
+        
+        // Position bounds
+        this.minX = -this.laneWidth / 2;
+        this.maxX = this.laneWidth / 2;
+
+        // Game states
+        this.gameStates = {
+            MENU: 'menu',
+            PLAYING: 'playing',
+            PAUSED: 'paused',
+            GAME_OVER: 'gameOver'
+        };
+        this.currentState = this.gameStates.MENU;
+
+        // Camera settings
+        this.cameraOffset = new THREE.Vector3(0, 8, 20);
+        this.cameraTarget = new THREE.Vector3(0, 2, -15);
+        this.camera.position.copy(this.cameraOffset);
+        this.camera.lookAt(this.cameraTarget);
 
         // Setup UI
         this.setupUI();
@@ -92,9 +141,6 @@ class Game {
         // Control scheme
         this.controlScheme = 'keyboard'; // 'keyboard' or 'pose'
         this.poseController = null;
-
-        // Initialize game elements
-        this.environment = new Environment(this.scene);
         
         // Initialize character
         this.character = new Character(this.scene, () => {
@@ -109,7 +155,12 @@ class Game {
 
         // Initialize loader for obstacles
         this.loader = new GLTFLoader();
+        this.loader.setDRACOLoader(new DRACOLoader().setDecoderPath('/draco/'));
+        this.loader.setKTX2Loader(new KTX2Loader());
         this.zombieModel = null;
+
+        // Add model cache
+        this.modelCache = new Map();
 
         // Setup GUI with control scheme toggle
         this.setupGUI();
@@ -199,15 +250,53 @@ class Game {
     }
 
     handlePoseControls(movements) {
-        if (this.controlScheme !== 'pose' || this.currentState !== this.gameStates.PLAYING) return;
+        console.log('movements', JSON.stringify(movements.walking));
 
-        this.isMovingLeft = movements.left;
-        this.isMovingRight = movements.right;
-        this.isMovingForward = movements.walking;
-        
-        if (movements.jump && !this.character.isJumping) {
-            this.character.jump();
+        if (!movements) return;
+
+        // Handle walking - update game speed based on walking detection
+        if (movements.walking) {
+            // Set forward movement flag
+            console.log('walking', movements.walking);
+            this.isMovingForward = true;
+            // Gradually increase speed to make movement smoother
+            this.speed = Math.min(this.speed + 0.01, this.settings.game.obstacleSpeed * 1.5);
+        } else {
+            // When not walking, gradually slow down
+            this.isMovingForward = false;
+            // this.speed = Math.max(this.speed - 0.01, 0);
         }
+
+        // Handle left/right movement
+        if (movements.left && this.character.position.x > this.minX) {
+            this.horizontalSpeed = -this.maxHorizontalSpeed;
+        } else if (movements.right && this.character.position.x < this.maxX) {
+            this.horizontalSpeed = this.maxHorizontalSpeed;
+        } else {
+            // Gradually slow down
+            this.horizontalSpeed *= 0.9;
+        }
+
+        // Apply horizontal movement with bounds checking
+        const newX = this.character.position.x + this.horizontalSpeed;
+        if (newX >= this.minX && newX <= this.maxX) {
+            this.character.position.x = newX;
+        }
+
+        // Handle jumping
+        if (movements.jump && !this.isJumping) {
+            this.isJumping = true;
+            this.verticalSpeed = this.jumpSpeed;
+        }
+
+        // Handle ducking
+        this.isDucking = movements.duck;
+        if (this.isDucking) {
+            this.character.scale.y = 0.5;
+        } else {
+            this.character.scale.y = 1;
+        }
+        
     }
 
     setupUI() {
@@ -335,7 +424,6 @@ class Game {
             this.character.setPosition(0, characterStartHeight, 0);
         }
 
-
         // Initialize pose controller if needed
         if (this.controlScheme === 'pose') {
             console.log('Displaying video element', this.poseController);
@@ -343,8 +431,6 @@ class Game {
                 this.initializePoseController().then(() => {
                     this.poseController.start();
                 });
-            } else {
-                // this.poseController.start();
             }
         }
 
@@ -559,8 +645,9 @@ class Game {
     }
 
     moveWorldForward(deltaTime) {
-        // Only move and spawn obstacles if moving forward
-        if (this.isMovingForward) {
+        console.log('speed', this.speed);
+        // Move obstacles and update environment based on current speed
+        // if (this.speed > 0) {
             // Move obstacles
             for (let i = this.obstacles.length - 1; i >= 0; i--) {
                 const obstacle = this.obstacles[i];
@@ -575,7 +662,7 @@ class Game {
 
             // Update environment with current speed
             this.environment.update(deltaTime, this.speed);
-        }
+        // }
     }
 
     updateCamera() {
@@ -666,9 +753,24 @@ class Game {
     }
 
     createObstacle() {
-        const obstacle = new Obstacle(this.scene, this.environment.roadWidth, this.roadOffset);
+        // Check cache first
+        if (this.modelCache.has('obstacle')) {
+            const cachedModel = this.modelCache.get('obstacle');
+            const obstacle = new Obstacle(this.scene, this.environment.roadWidth, this.environment.roadLength, cachedModel);
+            this.scene.add(obstacle.mesh);
+            this.obstacles.push(obstacle);
+            return;
+        }
+
+        // If not in cache, load and cache it
+        const obstacle = new Obstacle(this.scene, this.environment.roadWidth, this.environment.roadLength);
         this.scene.add(obstacle.mesh);
         this.obstacles.push(obstacle);
+        
+        // Cache the model for future use
+        if (obstacle.mesh) {
+            this.modelCache.set('obstacle', obstacle.mesh);
+        }
     }
 
     checkCollisions() {
