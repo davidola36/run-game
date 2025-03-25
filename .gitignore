@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+out/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+debug.log
+
+# Testing
+coverage/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Local development
+.local/
+*.local
+
+# Optional: Uncomment if using TypeScript
+# *.tsbuildinfo
+
+# Optional: Uncomment if using Next.js
+# .next/
+
+# Optional: Uncomment if using Parcel bundler
+# .parcel-cache/ 
