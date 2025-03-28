@@ -17,8 +17,8 @@ app.use((req, res, next) => {
     next();
 });
 
-// Serve the game client
-app.get('/', (req, res) => {
+// Serve the game client for all routes (for client-side routing)
+app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
