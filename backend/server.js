@@ -5,7 +5,7 @@ const http = require('http');
 const cors = require('cors');
 
 const app = express();
-const port = process.env.PORT || 10000;
+const port = process.env.PORT || 3000; // Glitch prefers port 3000
 
 // Enable CORS for all routes
 app.use((req, res, next) => {
@@ -14,22 +14,24 @@ app.use((req, res, next) => {
     next();
 });
 
+// Serve a simple homepage
+app.get('/', (req, res) => {
+    res.send('Game server is running!');
+});
+
 const server = http.createServer(app);
 
-// Create WebSocket server attached to the HTTP server
-const wss = new WebSocket.Server({ 
-    server,
-    verifyClient: (info, cb) => {
-        const origin = info.origin;
-        console.log('WebSocket connection attempt from:', origin);
-        // Send back proper headers in the callback
-        cb(true, 200, '', {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST',
-            'Access-Control-Allow-Headers': 'Content-Type'
-        });
-    }
-});
+// Create WebSocket server
+const wss = new WebSocket.Server({ server });
+
+// Keep the server alive on Glitch
+setInterval(() => {
+    wss.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.ping();
+        }
+    });
+}, 30000);
 
 // Store active game rooms
 const rooms = new Map();

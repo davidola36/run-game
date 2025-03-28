@@ -44,8 +44,10 @@ export class MultiplayerManager {
                 this.reconnectTimeout = null;
             }
 
-            // Get the WebSocket URL from environment variable or use local development URL
-            const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:10000';
+            // Get the WebSocket URL from environment variable or construct from window location
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = import.meta.env.VITE_WS_URL || 
+                         `${wsProtocol}//${window.location.hostname}:${window.location.port}`;
 
             console.log('Attempting WebSocket connection to:', wsUrl);
             this.socket = new WebSocket(wsUrl);
