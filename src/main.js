@@ -1,33 +1,19 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader';
-import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { Character } from './character.js';
 import { Environment } from './environment.js';
 import { Obstacle } from './obstacle.js';
 import { PoseController } from './poseController.js';
 import * as dat from 'dat.gui';
+import { MultiplayerManager } from './multiplayer.js';
 
 class Game {
     constructor() {
         // Add mixer property for animations
         this.mixer = null;
         this.animations = {};
-        
-        // Settings object for GUI controls
-        this.settings = {
-            zombie: {
-                scale: 0.01,  // Start with a reasonable initial scale
-                height: 1,
-                rotationSpeed: 0.5,
-                bobbingSpeed: 1,
-                bobbingAmplitude: 0.05
-            },
-            game: {
-                spawnRate: 0.03,
-                obstacleSpeed: 0.2
-            }
-        };
 
         // Store GUI instance
         this.gui = null;
@@ -94,6 +80,27 @@ class Game {
         // Initialize environment
         this.environment = new Environment(this.scene);
 
+         // Settings object for GUI controls
+         this.settings = {
+            zombie: {
+                scale: 0.01,  // Start with a reasonable initial scale
+                height: 1,
+                rotationSpeed: 0.5,
+                bobbingSpeed: 1,
+                bobbingAmplitude: 0.05
+            },
+            game: {
+                spawnRate: 0.03,
+                obstacleSpeed: 0.2,
+                spawnDistance: 30, // Initial spawn distance
+                roadWidth: this.environment.roadWidth,
+                roadLength: this.environment.roadLength
+            },
+            debug: {
+                showHitbox: false
+            }
+        };
+
         // Game properties - Initialize these after environment
         this.obstacles = [];
         this.score = 0;
@@ -125,7 +132,8 @@ class Game {
             MENU: 'menu',
             PLAYING: 'playing',
             PAUSED: 'paused',
-            GAME_OVER: 'gameOver'
+            GAME_OVER: 'gameOver',
+            MULTIPLAYER_LOBBY: 'multiplayerLobby'
         };
         this.currentState = this.gameStates.MENU;
 
@@ -143,10 +151,7 @@ class Game {
         this.poseController = null;
         
         // Initialize character
-        this.character = new Character(this.scene, () => {
-            const characterStartHeight = this.roadOffset + this.character.characterHeight/2;
-            this.character.setPosition(0, characterStartHeight, 0);
-        });
+        this.character = new Character(this.scene);
 
         // Event listeners
         window.addEventListener('resize', this.onWindowResize.bind(this));
@@ -167,6 +172,11 @@ class Game {
         
         // Initialize pose controller
         this.initializePoseController();
+
+        // Add multiplayer properties
+        this.multiplayerManager = null;
+        this.isMultiplayer = false;
+        this.opponentScore = 0;
 
         // Start game loop
         this.animate();
@@ -206,6 +216,7 @@ class Game {
         const gameFolder = this.gui.addFolder('Game Settings');
         gameFolder.add(this.settings.game, 'spawnRate', 0.01, 0.1).name('Spawn Frequency');
         gameFolder.add(this.settings.game, 'obstacleSpeed', 0.1, 2).name('Game Speed');
+        gameFolder.add(this.settings.game, 'spawnDistance', 20, 100).name('Spawn Distance');
 
         // Control scheme toggle
         const controlsFolder = this.gui.addFolder('Controls');
@@ -322,6 +333,12 @@ class Game {
 
         // Add touch/click event listeners to menu screen
         this.menuScreen.addEventListener('touchend', (event) => {
+            // Don't handle touch events if they're on a button or input
+            if (event.target.tagName.toLowerCase() === 'button' || 
+                event.target.tagName.toLowerCase() === 'input') {
+                return;
+            }
+
             event.preventDefault();
             if (this.currentState === this.gameStates.MENU || 
                 this.currentState === this.gameStates.GAME_OVER) {
@@ -359,13 +376,9 @@ class Game {
         let content = '';
         const isMobile = this.isMobileDevice();
         
-        // Automatically set control scheme based on device
+        // Only switch to touch controls if we're not using pose controls
         if (isMobile && this.controlScheme === 'keyboard') {
             this.controlScheme = 'touch';
-            if (this.poseController) {
-                console.log('in menu')
-                this.poseController.stop();
-            }
             this.initializeTouchControls();
         }
 
@@ -373,6 +386,18 @@ class Game {
             case this.gameStates.MENU:
                 content = `
                     <h1>Endless Runner</h1>
+                    <div style="margin: 20px 0;">
+                        <button onclick="window.game.startGame()" 
+                                style="padding: 10px 20px; margin: 5px; background: #4CAF50; 
+                                       border: none; border-radius: 5px; color: white; cursor: pointer;">
+                            Single Player
+                        </button>
+                        <button onclick="window.game.showMultiplayerOptions()" 
+                                style="padding: 10px 20px; margin: 5px; background: #2196F3; 
+                                       border: none; border-radius: 5px; color: white; cursor: pointer;">
+                            Multiplayer
+                        </button>
+                    </div>
                     ${isMobile ? `
                         <p>Tap Screen to Start</p>
                         <div style="margin: 15px 0; padding: 10px; background: rgba(255,255,255,0.1); border-radius: 8px;">
@@ -384,20 +409,110 @@ class Game {
                         <p>Use Arrow Keys to Move</p>
                         <p>Press ESC to Pause</p>
                     `}
+                    <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 8px;">
+                        <h3 style="margin: 0 0 10px 0;">Control Options</h3>
+                        <div style="display: flex; flex-direction: column; gap: 10px;">
+                            <button onclick="window.game.setControlScheme('keyboard')" 
+                                    style="padding: 10px; background: ${this.controlScheme === 'keyboard' ? '#4CAF50' : '#666'}; 
+                                           border: none; border-radius: 5px; color: white; cursor: pointer;">
+                                Keyboard Controls
+                            </button>
+                            <button onclick="window.game.setControlScheme('pose')" 
+                                    style="padding: 10px; background: ${this.controlScheme === 'pose' ? '#4CAF50' : '#666'}; 
+                                           border: none; border-radius: 5px; color: white; cursor: pointer;">
+                                Pose Controls
+                            </button>
+                            ${isMobile ? `
+                                <button onclick="window.game.setControlScheme('touch')" 
+                                        style="padding: 10px; background: ${this.controlScheme === 'touch' ? '#4CAF50' : '#666'}; 
+                                               border: none; border-radius: 5px; color: white; cursor: pointer;">
+                                    Touch Controls
+                                </button>
+                            ` : ''}
+                        </div>
+                        ${this.controlScheme === 'pose' ? `
+                            <div style="margin-top: 15px; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 5px;">
+                                <p style="margin: 5px 0">🎮 How to use Pose Controls:</p>
+                                <p style="margin: 5px 0">1. Stand in front of your camera</p>
+                                <p style="margin: 5px 0">2. Move left/right to control direction</p>
+                                <p style="margin: 5px 0">3. Jump in place to jump</p>
+                                <p style="margin: 5px 0">4. Duck to avoid obstacles</p>
+                                <p style="margin: 5px 0">5. Walk in place to move forward</p>
+                            </div>
+                        ` : ''}
+                    </div>
                 `;
                 break;
             case this.gameStates.GAME_OVER:
-                content = `
+                let gameOverContent = `
                     <h1>Game Over!</h1>
-                    <p>Score: ${this.score}</p>
-                    <p>${isMobile ? 'Tap Screen' : 'Press SPACE'} to Play Again</p>
-                `;
+                    <p>Your Score: ${this.score}</p>`;
+                
+                if (this.isMultiplayer && this.multiplayerManager) {
+                    const winner = this.multiplayerManager.determineWinner();
+                    gameOverContent += `
+                        <p style="font-size: 24px; color: #4CAF50; margin: 20px 0;">${winner}</p>
+                        <p>${isMobile ? 'Tap Screen' : 'Press SPACE'} to Play Again</p>`;
+                } else {
+                    gameOverContent += `
+                        <p>${isMobile ? 'Tap Screen' : 'Press SPACE'} to Play Again</p>`;
+                }
+
+                // Add Back to Menu button
+                gameOverContent += `
+                    <div style="margin-top: 20px;">
+                        <button onclick="window.game.endGame()" 
+                                style="padding: 10px 20px; 
+                                       background: #2196F3; 
+                                       border: none; 
+                                       border-radius: 5px; 
+                                       color: white; 
+                                       cursor: pointer;
+                                       font-size: 16px;">
+                            Back to Menu
+                        </button>
+                    </div>`;
+                
+                content = gameOverContent;
                 break;
             case this.gameStates.PAUSED:
                 content = `
                     <h1>Paused</h1>
                     <p>${isMobile ? 'Tap Screen' : 'Press ESC'} to Resume</p>
                     <p>Current Score: ${this.score}</p>
+                    <div style="margin-top: 20px;">
+                        <button onclick="window.game.endGame()" 
+                                style="padding: 10px 20px; 
+                                       background: #ff4444; 
+                                       border: none; 
+                                       border-radius: 5px; 
+                                       color: white; 
+                                       cursor: pointer;
+                                       font-size: 16px;">
+                            End Game
+                        </button>
+                    </div>
+                `;
+                break;
+            case this.gameStates.MULTIPLAYER_LOBBY:
+                content = `
+                    <h1>Multiplayer Lobby</h1>
+                    <div style="margin: 20px 0;">
+                        <button onclick="window.game.createMultiplayerRoom()" 
+                                style="padding: 10px 20px; margin: 5px; background: #4CAF50; 
+                                       border: none; border-radius: 5px; color: white; cursor: pointer;">
+                            Create Room
+                        </button>
+                        <div style="margin: 20px 0;">
+                            <input type="text" id="roomCodeInput" placeholder="Enter Room Code"
+                                   style="padding: 10px; margin-right: 10px; border-radius: 5px; border: 1px solid #ccc;">
+                            <button onclick="window.game.joinMultiplayerRoom(document.getElementById('roomCodeInput').value)" 
+                                    style="padding: 10px 20px; background: #2196F3; 
+                                           border: none; border-radius: 5px; color: white; cursor: pointer;">
+                                Join Room
+                            </button>
+                        </div>
+                    </div>
                 `;
                 break;
         }
@@ -406,36 +521,69 @@ class Game {
         this.pauseButton.style.display = this.currentState === this.gameStates.PLAYING ? 'block' : 'none';
     }
 
+    // Add new method for handling play again requests
+    handlePlayAgainRequest() {
+        if (this.isMultiplayer && this.multiplayerManager && this.currentState === this.gameStates.GAME_OVER) {
+            console.log('Requesting play again from other player...');
+            this.menuScreen.innerHTML = `
+                <h1>Waiting for other player...</h1>
+                <p>Requested to play again</p>
+            `;
+            this.multiplayerManager.requestPlayAgain();
+            return true;
+        }
+        return false;
+    }
+
     startGame() {
-        // Clean up the scene first
-        this.cleanupScene();
-        
         // Reset game state
+        console.log('starting game', this.character.getPosition());
+        this.cleanupScene();
         this.score = 0;
-        this.speed = this.settings.game.obstacleSpeed;
-        this.obstacles = []; // Ensure obstacles array is empty
-        this.isMovingLeft = false;
-        this.isMovingRight = false;
-        this.isMovingForward = false;
-        
-        // Position character correctly on the road
-        if (this.character) {
-            const characterStartHeight = this.roadOffset + this.character.characterHeight/2;
-            this.character.setPosition(0, characterStartHeight, 0);
-        }
-
-        // Initialize pose controller if needed
-        if (this.controlScheme === 'pose') {
-            console.log('Displaying video element', this.poseController);
-            if (!this.poseController) {
-                this.initializePoseController().then(() => {
-                    this.poseController.start();
-                });
-            }
-        }
-
-        // Then start the game
         this.currentState = this.gameStates.PLAYING;
+        this.obstacles = [];
+        this.isMovingForward = false;
+        this.speed = this.settings.game.obstacleSpeed;
+
+        // Create character if needed
+        if (!this.character) {
+            this.character = new Character(this.scene, true);
+        }
+
+        // Position character based on game mode
+        const characterStartHeight = this.roadOffset + this.character.characterHeight/2;
+        let lanePosition;
+        
+        if (this.isMultiplayer && this.multiplayerManager) {
+            // In multiplayer, host is on left lane, other player on right lane
+            const isHost = this.multiplayerManager.isHost;
+            console.log('Multiplayer positioning:', { isHost, laneWidth: this.laneWidth });
+            lanePosition = isHost ? -this.laneWidth/2 : this.laneWidth/2;
+        } else {
+            // In single player, always start in the middle left lane
+            lanePosition = -this.laneWidth/2;
+        }
+
+        // Reset character state first
+        this.character.reset();
+        
+        // Then set the correct lane position
+        this.character.setPosition(lanePosition, characterStartHeight, 0);
+        this.character.virtualPosition.set(lanePosition, characterStartHeight, 0);
+        
+        console.log('character position:', {
+            lanePosition,
+            characterHeight: this.character.characterHeight,
+            roadOffset: this.roadOffset,
+            laneWidth: this.laneWidth,
+            isMultiplayer: this.isMultiplayer,
+            isHost: this.multiplayerManager?.isHost
+        });
+
+        // Create initial set of obstacles
+        this.initializeObstacles();
+
+        // Update menu screen
         this.updateMenuScreen();
     }
 
@@ -467,17 +615,33 @@ class Game {
         this.obstacles.forEach(obstacle => obstacle.dispose());
         this.obstacles = [];
 
-        // Store reference to our character before cleanup
-        const currentCharacter = this.character;
+        // Store character and its label temporarily if they exist
+        let characterModel = null;
+        let characterLabel = null;
+        if (this.character && this.character.model) {
+            characterModel = this.character.model;
+            characterLabel = this.character.labelMesh;
+            this.scene.remove(characterModel);
+        }
 
-        // Remove all objects from the scene except lights, essential elements, and character
+        // Store opponent models temporarily if they exist
+        const opponentModels = new Map();
+        if (this.isMultiplayer && this.multiplayerManager) {
+            for (const [playerId, opponent] of this.multiplayerManager.opponents) {
+                if (opponent && opponent.model) {
+                    opponentModels.set(playerId, opponent.model);
+                    this.scene.remove(opponent.model);
+                }
+            }
+        }
+
+        // Remove all objects from the scene except lights
         while (this.scene.children.length > 0) {
             const object = this.scene.children[0];
             if (object.type === 'DirectionalLight' || 
                 object.type === 'AmbientLight' || 
-                object.type === 'PointLight' ||
-                (currentCharacter && object === currentCharacter.model)) {
-                // Skip lights and character model
+                object.type === 'PointLight') {
+                // Skip lights
                 this.scene.children.shift();
                 continue;
             }
@@ -487,17 +651,23 @@ class Game {
 
         // Reinitialize essential game elements
         this.environment = new Environment(this.scene);
-        
-        // Re-add our character if it exists
-        if (currentCharacter && currentCharacter.model) {
-            this.scene.add(currentCharacter.model);
-            this.character = currentCharacter;
+
+        // Restore character if it exists
+        if (characterModel) {
+            this.scene.add(characterModel);
+            if (characterLabel) {
+                characterModel.add(characterLabel);
+            }
         }
 
-        // Clean up pose controller
-        // if (this.poseController) {
-        //     this.poseController.cleanup();
-        // }
+        // Restore opponent models if they exist
+        if (this.isMultiplayer && this.multiplayerManager) {
+            for (const [playerId, model] of opponentModels) {
+                if (model) {
+                    this.scene.add(model);
+                }
+            }
+        }
     }
 
     setupLighting() {
@@ -553,9 +723,17 @@ class Game {
                 }
                 break;
             case ' ':
-                if (this.currentState === this.gameStates.MENU || 
-                    this.currentState === this.gameStates.GAME_OVER) {
+                if (this.currentState === this.gameStates.MENU) {
                     this.startGame();
+                    return;
+                }
+                if (this.currentState === this.gameStates.GAME_OVER) {
+                    // Handle multiplayer play again request
+                    if (this.isMultiplayer && this.multiplayerManager) {
+                        this.handlePlayAgainRequest();
+                    } else {
+                        this.startGame();
+                    }
                     return;
                 }
                 if (this.currentState === this.gameStates.PLAYING) {
@@ -597,7 +775,9 @@ class Game {
     updatePlayerPosition(deltaTime) {
         if (!this.character) return;
 
+
         const currentPos = this.character.getPosition();
+        const currentVirtualPos = this.character.getVirtualPosition();
         let newX = currentPos.x;
 
         // Handle left/right movement
@@ -610,10 +790,11 @@ class Game {
 
         // Update character position
         this.character.setPosition(newX, currentPos.y, 0);
-
+        // this.character.updateLabelPosition();
         // Handle forward movement regardless of jumping state
         if (this.isMovingForward) {
-            this.moveWorldForward(deltaTime);
+            currentVirtualPos.z -= this.speed;
+            this.character.setVirtualPosition(currentVirtualPos.x, currentVirtualPos.y, currentVirtualPos.z);
         }
 
         // Update character animation based on movement state
@@ -645,13 +826,12 @@ class Game {
     }
 
     moveWorldForward(deltaTime) {
-        console.log('speed', this.speed);
         // Move obstacles and update environment based on current speed
         // if (this.speed > 0) {
             // Move obstacles
             for (let i = this.obstacles.length - 1; i >= 0; i--) {
                 const obstacle = this.obstacles[i];
-                obstacle.update(this.speed, deltaTime);
+                obstacle.update(deltaTime, this.speed);
                 
                 // Remove obstacles that are behind the camera
                 if (obstacle.isBehindCamera()) {
@@ -685,12 +865,8 @@ class Game {
     }
 
     updateGame(deltaTime) {
+        console.log('updating game');
         if (this.currentState !== this.gameStates.PLAYING) return;
-
-        // Update character
-        if (this.character) {
-            this.character.update(deltaTime);
-        }
 
         // Update player position
         this.updatePlayerPosition(deltaTime);
@@ -705,6 +881,8 @@ class Game {
 
         // Update obstacles only when moving forward
         if (this.isMovingForward) {
+            this.moveWorldForward(deltaTime);
+
             // Update score only when moving forward
             this.score += Math.round(this.speed * 10);
             this.scoreElement.textContent = 'Score: ' + this.score;
@@ -715,6 +893,13 @@ class Game {
 
         // Check for collisions
         this.checkCollisions();
+
+        // Send position updates in multiplayer mode
+        // if (this.isMultiplayer && this.multiplayerManager) {
+        //     const playerPos = this.character.getVirtualPosition();
+        //     const currentAnimation = this.character.currentAnimation;
+        //     this.multiplayerManager.sendPlayerUpdate(playerPos, currentAnimation);
+        // }
     }
 
     createTestObstacle() {
@@ -753,24 +938,9 @@ class Game {
     }
 
     createObstacle() {
-        // Check cache first
-        if (this.modelCache.has('obstacle')) {
-            const cachedModel = this.modelCache.get('obstacle');
-            const obstacle = new Obstacle(this.scene, this.environment.roadWidth, this.environment.roadLength, cachedModel);
-            this.scene.add(obstacle.mesh);
-            this.obstacles.push(obstacle);
-            return;
-        }
-
-        // If not in cache, load and cache it
-        const obstacle = new Obstacle(this.scene, this.environment.roadWidth, this.environment.roadLength);
-        this.scene.add(obstacle.mesh);
+        // Create new obstacle with settings
+        const obstacle = new Obstacle(this.scene, this.settings);
         this.obstacles.push(obstacle);
-        
-        // Cache the model for future use
-        if (obstacle.mesh) {
-            this.modelCache.set('obstacle', obstacle.mesh);
-        }
     }
 
     checkCollisions() {
@@ -779,52 +949,61 @@ class Game {
         const playerPos = this.character.getPosition();
         const collisionBox = new THREE.Box3().setFromCenterAndSize(
             playerPos,
-            new THREE.Vector3(1, this.character.characterHeight, 1)
+            new THREE.Vector3(0.5, this.character.characterHeight, 0.5)  // Match character's actual size
         );
         
         for (const obstacle of this.obstacles) {
             if (collisionBox.intersectsBox(obstacle.getCollisionBox())) {
                 this.currentState = this.gameStates.GAME_OVER;
+                // Send game over state if in multiplayer
+                if (this.isMultiplayer && this.multiplayerManager) {
+                    console.log('Collision detected, sending game over');
+                    this.multiplayerManager.sendGameOver();
+                }
                 this.updateMenuScreen();
+                return;
             }
         }
     }
 
-    animate(currentTime = 0) {
-        requestAnimationFrame(this.animate.bind(this));
+    animate() {
+        // Always request next frame first
+        requestAnimationFrame(() => this.animate());
 
         // Calculate delta time
+        const currentTime = performance.now();
         const deltaTime = (currentTime - this.lastTime) / 1000;
         this.lastTime = currentTime;
 
-        // Ensure video feed visibility in pose control mode
-        if (this.controlScheme === 'pose' && 
-            this.poseController && 
-            this.poseController.videoElement) {
-            this.poseController.videoElement.style.display = 'block';
-        }
-
-        // Only update game if in PLAYING state
+        // Only update game logic if playing
         if (this.currentState === this.gameStates.PLAYING) {
             // Update game state
             this.updateGame(deltaTime);
-            
+
             // Update character animations
-            if (this.character) {
+            if (this.character && this.character.mixer) {
                 this.character.update(deltaTime);
             }
 
-            // Update player position and camera
-            this.updatePlayerPosition(deltaTime);
-            this.updateCamera();
-
-            // Move world forward if moving forward
-            if (this.isMovingForward) {
-                this.moveWorldForward(deltaTime);
+            // Update multiplayer positions and labels
+            if (this.isMultiplayer && this.multiplayerManager) {
+                // Send position update to other players
+                if (this.character && this.character.model) {
+                    let characterPosition = this.character.getVirtualPosition();
+                    const position = {
+                        x: this.character.model.position.x,
+                        y: this.character.model.position.y,
+                        z: characterPosition.z
+                    };
+                    this.multiplayerManager.sendPlayerUpdate(position, this.character.currentAnimation);
+                }
+                
+                // Update opponent animations
+                this.multiplayerManager.updateOpponentAnimations(deltaTime);
             }
         }
 
-        // Render scene
+        // Always render the scene
         this.renderer.render(this.scene, this.camera);
     }
 
@@ -985,7 +1164,253 @@ class Game {
             (window.innerWidth <= 800 && window.innerHeight <= 900)
         );
     }
+
+    // Add method to set control scheme
+    setControlScheme(scheme) {
+        this.controlScheme = scheme;
+        if (scheme === 'pose') {
+            this.initializePoseController().then(() => {
+                if (this.poseController) {
+                    this.poseController.start();
+                }
+            });
+        } else if (this.poseController) {
+            this.poseController.stop();
+        }
+        this.updateMenuScreen();
+    }
+
+    // Add method to end the game
+    endGame() {
+        // Reset score
+        this.score = 0;
+        
+        // Reset game state
+        this.speed = this.settings.game.obstacleSpeed;
+        this.isMovingLeft = false;
+        this.isMovingRight = false;
+        this.isMovingForward = false;
+        
+        // Clean up the scene
+        this.cleanupScene();
+        
+        // Update score display
+        if (this.scoreElement) {
+            this.scoreElement.textContent = 'Score: 0';
+        }
+        
+        // Go back to menu
+        this.currentState = this.gameStates.MENU;
+        this.updateMenuScreen();
+        
+        // If using pose controls, stop the pose controller
+        if (this.controlScheme === 'pose' && this.poseController) {
+            this.poseController.stop();
+        }
+
+        // Clean up multiplayer if active
+        if (this.isMultiplayer && this.multiplayerManager) {
+            this.multiplayerManager.dispose();
+            this.multiplayerManager = null;
+            this.isMultiplayer = false;
+        }
+    }
+
+    // Add multiplayer methods
+    initializeMultiplayer() {
+        this.multiplayerManager = new MultiplayerManager(this);
+        this.isMultiplayer = true;
+    }
+
+    createMultiplayerRoom() {
+        if (!this.multiplayerManager) {
+            console.log('Initializing multiplayer manager for room creation...');
+            this.multiplayerManager = new MultiplayerManager(this);
+        }
+        this.multiplayerManager.createRoom();
+    }
+
+    joinMultiplayerRoom(roomId) {
+        if (!this.multiplayerManager) {
+            console.log('Initializing multiplayer manager for room joining...');
+            this.multiplayerManager = new MultiplayerManager(this);
+        }
+        this.multiplayerManager.joinRoom(roomId);
+    }
+
+    showRoomCode(roomId) {
+        // Update the menu screen to show the room code
+        const roomCodeDisplay = document.createElement('div');
+        roomCodeDisplay.style.cssText = `
+            margin: 20px 0;
+            padding: 15px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 8px;
+            font-size: 24px;
+        `;
+        roomCodeDisplay.innerHTML = `
+            <h3>Room Code:</h3>
+            <div style="font-size: 32px; font-weight: bold; color: #4CAF50;">${roomId}</div>
+            <p style="font-size: 16px; margin-top: 10px;">Share this code with your friend to join the game</p>
+        `;
+        
+        // Find the existing room code display if any and remove it
+        const existingRoomCode = this.menuScreen.querySelector('#room-code-display');
+        if (existingRoomCode) {
+            existingRoomCode.remove();
+        }
+        
+        // Add the new room code display
+        roomCodeDisplay.id = 'room-code-display';
+        this.menuScreen.appendChild(roomCodeDisplay);
+    }
+
+    startMultiplayerGame() {
+        console.log('starting multiplayer game')
+        // Set multiplayer flag
+        this.isMultiplayer = true;
+        
+        // Clean up the scene
+        this.cleanupScene();
+        
+        // Reset game state variables
+        this.score = 0;
+        this.speed = this.settings.game.obstacleSpeed;
+        this.obstacles = [];
+        this.isMovingLeft = false;
+        this.isMovingRight = false;
+        this.isMovingForward = false;
+        this.lastTime = performance.now();
+        // this.currentState = this.gameStates.PLAYING;
+              
+        
+        // Initialize pose controller if needed
+        if (this.controlScheme === 'pose' && !this.poseController) {
+            this.initializePoseController();
+        }
+        
+        // Hide menu and start the game
+        this.menuScreen.style.display = 'none';
+        this.startGame();
+        
+    }
+
+    handleMultiplayerDisconnect() {
+        alert('Disconnected from multiplayer game');
+        this.isMultiplayer = false;
+        this.currentState = this.gameStates.MENU;
+        this.updateMenuScreen();
+    }
+
+    // Add method to show multiplayer options
+    showMultiplayerOptions() {
+        // Initialize multiplayer manager if not already done
+        if (!this.multiplayerManager) {
+            console.log('Initializing multiplayer manager...');
+            this.multiplayerManager = new MultiplayerManager(this);
+        }
+        this.currentState = this.gameStates.MULTIPLAYER_LOBBY;
+        this.updateMenuScreen();
+    }
+
+    showPlayAgainPrompt(playerId) {
+        const content = `
+            <h1>Play Again?</h1>
+            <p>${playerId} wants to play again!</p>
+            <div style="margin: 20px 0;">
+                <button onclick="window.game.acceptPlayAgain()" 
+                        style="padding: 10px 20px; margin: 5px; background: #4CAF50; 
+                               border: none; border-radius: 5px; color: white; cursor: pointer;">
+                    Play Again
+                </button>
+                <button onclick="window.game.declinePlayAgain()" 
+                        style="padding: 10px 20px; margin: 5px; background: #f44336; 
+                               border: none; border-radius: 5px; color: white; cursor: pointer;">
+                    Return to Menu
+                </button>
+            </div>
+        `;
+        this.menuScreen.innerHTML = content;
+        this.menuScreen.style.display = 'block';
+    }
+
+    acceptPlayAgain() {
+        if (this.multiplayerManager) {
+            this.multiplayerManager.acceptPlayAgain();
+        }
+    }
+
+    declinePlayAgain() {
+        if (this.multiplayerManager) {
+            this.multiplayerManager.declinePlayAgain();
+        }
+    }
+
+    initializeSettings() {
+        console.log('initializing settings', this.settings.game.roadWidth);
+        this.settings = {
+            game: {
+                speed: 0.2,
+                spawnRate: 0.03,
+                spawnDistance: 30, // Initial spawn distance
+                roadWidth: this.environment.roadWidth,
+                roadLength: this.environment.roadLength,
+                obstacleSpeed: 0.2
+            },
+            debug: {
+                showHitbox: false
+            }
+        };
+
+        // Initialize GUI if in debug mode
+        if (this.debug) {
+            this.gui = new GUI();
+            const gameFolder = this.gui.addFolder('Game Settings');
+            gameFolder.add(this.settings.game, 'speed', 0.1, 1).name('Game Speed');
+            gameFolder.add(this.settings.game, 'spawnRate', 0.01, 0.1).name('Spawn Rate');
+            gameFolder.add(this.settings.game, 'spawnDistance', 20, 100).name('Spawn Distance');
+            gameFolder.add(this.settings.game, 'obstacleSpeed', 0.1, 1).name('Obstacle Speed');
+            
+            const debugFolder = this.gui.addFolder('Debug');
+            debugFolder.add(this.settings.debug, 'showHitbox').name('Show Hitbox');
+        }
+    }
+
+    initializeObstacles() {
+        // Create initial obstacles from spawn distance to end of road
+        const startZ = -this.settings.game.spawnDistance;
+        const endZ = -this.settings.game.roadLength;
+        const spacing = 15;  // Space between obstacles
+        
+        // Calculate how many obstacles we can fit
+        const distance = Math.abs(endZ - startZ);
+        const numberOfObstacles = Math.floor(distance / spacing);
+        
+        console.log('Creating initial obstacles:', {
+            startZ,
+            endZ,
+            spacing,
+            numberOfObstacles
+        });
+
+        // Create obstacles from near to far
+        for(let i = 0; i < numberOfObstacles; i++) {
+            const z = startZ - (i * spacing);  // Start close and move further
+            this.createInitialObstacle(z);
+        }
+    }
+
+    createInitialObstacle(zPosition) {
+        const obstacle = new Obstacle(this.scene, {
+            ...this.settings,
+            game: {
+                ...this.settings.game,
+                spawnDistance: Math.abs(zPosition)  // Override spawn distance
+            }
+        });
+        this.obstacles.push(obstacle);
+    }
 }
 
 // Start the game
-new Game(); 
+window.game = new Game(); 

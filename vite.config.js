@@ -5,26 +5,29 @@ export default defineConfig({
     base: './',
     server: {
         host: true,
+        allowedHosts: true,
         port: 3000,
-        // strictPort: true,
-        // hmr: {
-        //     host: 'localhost',
-        //     clientPort: 443
-        // },
-        // cors: true,
-        allowedHosts: true
-    },
-    preview: {
-        host: true,
-        port: 3000,
-        strictPort: true
+        proxy: {
+            '/ws': {
+                target: 'ws://localhost:3001',
+                ws: true,
+                changeOrigin: true,
+                rewrite: (path) => path.replace(/^\/ws/, '')
+            }
+        }
     },
     optimizeDeps: {
         include: [
-            '@tensorflow/tfjs-core',
+            'three',
+            'three/examples/jsm/loaders/GLTFLoader',
+            'three/examples/jsm/loaders/DRACOLoader',
+            'three/examples/jsm/loaders/KTX2Loader',
+            '@tensorflow/tfjs',
             '@tensorflow/tfjs-backend-webgl',
-            '@tensorflow-models/posenet'
-        ]
+            '@tensorflow-models/pose-detection',
+            'dat.gui'
+        ],
+        exclude: []
     },
     build: {
         commonjsOptions: {
