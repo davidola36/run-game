@@ -1,11 +1,14 @@
 const WebSocket = require('ws');
-const { v4: uuidv4 } = require('uuid');
 const express = require('express');
 const http = require('http');
-const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 
 const app = express();
-const port = process.env.PORT || 3000; // Glitch prefers port 3000
+const port = process.env.PORT || 8080;
+
+// Serve static files from the dist directory
+app.use(express.static(path.join(__dirname, '../dist')));
 
 // Enable CORS for all routes
 app.use((req, res, next) => {
@@ -14,24 +17,13 @@ app.use((req, res, next) => {
     next();
 });
 
-// Serve a simple homepage
+// Serve the game client
 app.get('/', (req, res) => {
-    res.send('Game server is running!');
+    res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
 const server = http.createServer(app);
-
-// Create WebSocket server
 const wss = new WebSocket.Server({ server });
-
-// Keep the server alive on Glitch
-setInterval(() => {
-    wss.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.ping();
-        }
-    });
-}, 30000);
 
 // Store active game rooms
 const rooms = new Map();
@@ -231,10 +223,14 @@ app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
-// Start the server
+// Start the server with error handling
 server.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
+    console.log(`Server running at http://localhost:${port}`);
 }).on('error', (err) => {
-    console.error('Server error:', err);
+    if (err.code === 'EADDRINUSE') {
+        console.error(`Port ${port} is already in use. Please try a different port or close the application using port ${port}.`);
+    } else {
+        console.error('Server error:', err);
+    }
     process.exit(1);
 }); 
